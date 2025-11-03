@@ -40,6 +40,11 @@ def resample_ohlcv(df_slice, timeframe):
         return df_slice
     rule = TF_MAP.get(timeframe, "1T")
     temp = df_slice.set_index('timestamp').sort_index()
+
+    # ensure continuous 1-min index to avoid skipping
+    full_index = pd.date_range(start=temp.index.min(), end=temp.index.max(), freq='1T')
+    temp = temp.reindex(full_index, method='pad')  # forward-fill gaps
+
     agg = {
         'open': 'first',
         'high': 'max',
@@ -47,11 +52,11 @@ def resample_ohlcv(df_slice, timeframe):
         'close': 'last',
         'volume': 'sum'
     }
-    res = temp.resample(rule).apply(agg).dropna().reset_index()
-    # Convert timestamp to string for JSON
+    res = temp.resample(rule, label='left', closed='left').apply(agg).dropna().reset_index()
+    res.rename(columns={'index': 'timestamp'}, inplace=True)
     res['timestamp'] = res['timestamp'].dt.strftime("%Y-%m-%d %H:%M:%S")
-    # Keep only expected columns
-    return res[['timestamp','open','high','low','close','volume']]
+    return res[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+
 
 # === ROUTES ===
 @app.route('/')
