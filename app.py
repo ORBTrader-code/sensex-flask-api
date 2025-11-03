@@ -5,7 +5,7 @@ import re
 app = Flask(__name__)
 
 # Load data once (improves performance)
-CSV_FILE = "Nifty_data.csv"
+CSV_FILE = "nifty_data.csv"
 df = pd.read_csv(CSV_FILE)
 
 # --- Extract strike from tradingsymbol column ---
