@@ -1,26 +1,37 @@
 from flask import Flask, jsonify
 import pandas as pd
+import re
 
 app = Flask(__name__)
 
-# Load CSV once when the app starts
-try:
-    df = pd.read_csv("nifty_data.csv")
-except Exception as e:
-    df = None
-    print(f"❌ Error loading CSV: {e}")
+# Load data once (improves performance)
+CSV_FILE = "Nifty_data.csv"
+df = pd.read_csv(CSV_FILE)
+
+# --- Extract strike from tradingsymbol column ---
+def extract_strike(symbol):
+    match = re.search(r'(\d{5})(CE|PE)', symbol)
+    if match:
+        return match.group(1) + match.group(2)
+    return None
+
+df['strike'] = df['tradingsymbol'].apply(extract_strike)
 
 @app.route('/')
 def home():
-    return "✅ Nifty Data API is Running!"
+    return "✅ Nifty Options API is live!"
 
 @app.route('/preview')
-def preview_data():
-    if df is not None:
-        # Return first 5 rows as JSON
-        return jsonify(df.head(5).to_dict(orient="records"))
-    else:
-        return jsonify({"error": "Data not loaded."}), 500
+def preview():
+    return df.head(10).to_json(orient="records")
+
+@app.route('/strike/<strike>')
+def get_strike_data(strike):
+    strike = strike.upper()
+    filtered = df[df['strike'] == strike]
+    if filtered.empty:
+        return jsonify({"error": f"No data found for strike {strike}"}), 404
+    return filtered.to_json(orient="records")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
