@@ -39,33 +39,37 @@ def resample_ohlcv(df_slice, timeframe):
     if df_slice.empty:
         return df_slice
 
-    # Map the timeframe to pandas frequency code
     TF_MAP = {
         "1m": "1T",
         "3m": "3T",
         "5m": "5T",
         "10m": "10T",
         "15m": "15T",
-        "30m": "30T"
+        "30m": "30T",
+        "1h": "1H"
     }
-
     rule = TF_MAP.get(timeframe, "1T")
+
     df_slice = df_slice.copy()
     df_slice["timestamp"] = pd.to_datetime(df_slice["timestamp"])
     df_slice = df_slice.set_index("timestamp").sort_index()
 
-    # ---- 1️⃣ Keep only market hours (09:15–15:30) ----
-    df_slice = df_slice.between_time("09:15", "15:30")
+    # Group by date so each day handled separately
+    grouped = []
+    for day, day_df in df_slice.groupby(df_slice.index.date):
+        day_start = pd.Timestamp(day) + pd.Timedelta(hours=9, minutes=15)
+        day_end = pd.Timestamp(day) + pd.Timedelta(hours=15, minutes=30)
+        day_df = day_df.between_time("09:15", "15:30")
 
-    # ---- 2️⃣ Fill any missing 1-min candles only within that range ----
-    full_index = pd.date_range(
-        start=df_slice.index.min().floor("D") + pd.Timedelta(hours=9, minutes=15),
-        end=df_slice.index.max().floor("D") + pd.Timedelta(hours=15, minutes=30),
-        freq="1T"
-    )
-    df_slice = df_slice.reindex(full_index).ffill()
+        # Create 1-min grid only within market hours
+        full_index = pd.date_range(start=day_start, end=day_end, freq="1T")
+        day_df = day_df.reindex(full_index).ffill()
 
-    # ---- 3️⃣ Aggregate properly by timeframe ----
+        grouped.append(day_df)
+
+    df_filled = pd.concat(grouped).sort_index()
+
+    # Aggregate to target timeframe
     agg = {
         "open": "first",
         "high": "max",
@@ -73,17 +77,17 @@ def resample_ohlcv(df_slice, timeframe):
         "close": "last",
         "volume": "sum"
     }
+
     res = (
-        df_slice.resample(rule, label="left", closed="left")
+        df_filled.resample(rule, label="left", closed="left")
         .apply(agg)
         .dropna()
         .reset_index()
     )
     res.rename(columns={"index": "timestamp"}, inplace=True)
     res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
-
-    # ---- 4️⃣ Return final clean OHLCV ----
     return res[["timestamp", "open", "high", "low", "close", "volume"]]
+
 
 
 # === ROUTES ===
