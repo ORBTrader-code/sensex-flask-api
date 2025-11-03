@@ -61,8 +61,8 @@ def resample_ohlcv(df_slice, timeframe):
         day_end = pd.Timestamp(day) + pd.Timedelta(hours=15, minutes=30)
         day_df = day_df.between_time("09:15", "15:30")
 
-        # Create 1-min grid only within market hours
-        full_index = pd.date_range(start=day_start, end=day_end, freq="1T")
+        # Create full index with the correct frequency
+        full_index = pd.date_range(start=day_start, end=day_end, freq=rule)
         day_df = day_df.reindex(full_index).ffill()
 
         grouped.append(day_df)
@@ -87,6 +87,7 @@ def resample_ohlcv(df_slice, timeframe):
     res.rename(columns={"index": "timestamp"}, inplace=True)
     res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
     return res[["timestamp", "open", "high", "low", "close", "volume"]]
+
 
 
 
