@@ -72,20 +72,24 @@ def resample_ohlcv(df_slice, timeframe):
     df_filled = pd.concat(grouped).sort_index()
 
     # Aggregate to target timeframe
+    agg = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum"
+    }
+
     res = (
-        df_filled.groupby(pd.Grouper(freq=rule))
-        .agg({
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum"
-        })
+        df_filled.resample(rule, label="left", closed="left")
+        .apply(agg)
+        .dropna()
         .reset_index()
     )
     res.rename(columns={"index": "timestamp"}, inplace=True)
     res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
     return res[["timestamp", "open", "high", "low", "close", "volume"]]
+
 
 
 
