@@ -91,14 +91,14 @@ def resample_ohlcv(df_slice, timeframe):
             continue
 
         # 1. Resample the daily data. 
-        # label="left" (timestamp is bar start) and closed="left" (interval is inclusive of start)
-        # origin='start_day' ensures candle start times are aligned correctly (e.g., 9:15, 9:20, 9:25...)
+        # CRITICAL FIX: Use origin='9:15:00' to align all timeframes (30m, 1h, etc.) 
+        # to the exact market open time, preventing incorrect 9:00:00 bars.
         res_day = (
             day_df.resample(
                 rule, 
                 label="left", 
                 closed="left",
-                origin='start_day'
+                origin='9:15:00' # FIXED: Anchors all bars to start on 9:15, 9:45, 10:15, etc.
             )
             .apply(agg)
             # Drop any bars that had no 1-minute data in their period
