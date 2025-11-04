@@ -25,8 +25,6 @@ except Exception as e:
     df = pd.DataFrame(columns=["date","tradingsymbol","expiry","timestamp","open","high","low","close","volume"])
 
 # helper: extract strike + type (like "24700PE") and strike number "24700"
-
-
 def extract_strike_and_type(sym):
     m = re.search(r'(\d{5})(CE|PE)', sym)
     if m:
@@ -35,8 +33,10 @@ def extract_strike_and_type(sym):
 
 df['_strike_num'] = df['tradingsymbol'].apply(lambda s: extract_strike_and_type(s)[0])
 df['_opt_type'] = df['tradingsymbol'].apply(lambda s: extract_strike_and_type(s)[1])
+# normalize expiry if present as string (keep as-is)
+df['expiry'] = df['expiry'].astype(str)
 
-
+# === RESAMPLE UTILITY ===
 def resample_ohlcv(df_slice, timeframe):
     if df_slice.empty:
         return df_slice
@@ -65,10 +65,7 @@ def resample_ohlcv(df_slice, timeframe):
 
         # Create full index with the correct frequency
         full_index = pd.date_range(start=day_start, end=day_end, freq=rule)
-        day_df = day_df.reindex(full_index, method='ffill')
-
-        # Fill NaN values with the previous value
-        day_df = day_df.fillna(method='ffill')
+        day_df = day_df.reindex(full_index).ffill()
 
         grouped.append(day_df)
 
@@ -92,7 +89,6 @@ def resample_ohlcv(df_slice, timeframe):
     res.rename(columns={"index": "timestamp"}, inplace=True)
     res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
     return res[["timestamp", "open", "high", "low", "close", "volume"]]
-
 
 
 # === ROUTES ===
