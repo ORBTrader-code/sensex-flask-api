@@ -81,8 +81,6 @@ def resample_ohlcv(df_slice, timeframe):
     }
 
     resampled_days = []
-    rule_td = pd.Timedelta(rule)
-    market_close_time = pd.Timedelta(hours=15, minutes=30)
     
     # Group by date to handle daily sessions separately and prevent data leakage across days
     for day, day_df in df_slice.groupby(df_slice.index.date):
@@ -91,31 +89,24 @@ def resample_ohlcv(df_slice, timeframe):
             continue
 
         # 1. Resample the daily data. 
-        # CRITICAL FIX: Use origin='9:15:00' to align all timeframes (30m, 1h, etc.) 
-        # to the exact market open time, preventing incorrect 9:00:00 bars.
+        # Use origin='9:15:00' to align all timeframes to the exact market open time.
         res_day = (
             day_df.resample(
                 rule, 
                 label="left", 
                 closed="left",
-                origin='9:15:00' # FIXED: Anchors all bars to start on 9:15, 9:45, 10:15, etc.
+                origin='9:15:00'
             )
             .apply(agg)
             # Drop any bars that had no 1-minute data in their period
             .dropna(subset=['open', 'high', 'low', 'close']) 
         )
         
-        # 2. Strict Boundary Check: Filter bars that end after the market close (15:30)
-        # The end of the last 1-minute bar in the group must be <= 15:30:00.
-        
-        # Calculate the end time of the last 1m candle that forms the current resampled bar
-        bar_end_time = res_day.index + rule_td - pd.Timedelta(minutes=1)
-        
-        # The market closes at 15:30:00.
-        day_end_timestamp = pd.Timestamp(day) + market_close_time
-        
-        # Keep only bars that complete at or before 15:30:00
-        res_day = res_day[bar_end_time <= day_end_timestamp]
+        # 2. FIX: The strict boundary check that dropped the final partial bar 
+        # (e.g., 3:15 PM candle) has been removed.
+        # Since the input data is already strictly filtered to 09:15-15:30, 
+        # the resampled data will naturally stop at the final bar containing data,
+        # regardless of its length.
         
         resampled_days.append(res_day)
 
