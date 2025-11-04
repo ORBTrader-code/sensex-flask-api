@@ -12,12 +12,13 @@ CSV_FILE = os.path.join(os.path.dirname(__file__), "nifty_data.csv")
 # Global TF_MAP used for pandas rule lookup
 TF_MAP = {
     "1m": "1T", 
-    "3m": "3T", 
+    "3m": "3T", # Added/Confirmed
     "5m": "5T", 
     "10m": "10T", 
     "15m": "15T", 
     "30m": "30T", 
-    "1h": "1H"
+    "1h": "1H",
+    "1D": "D" # Pandas rule for Daily Resampling
 }
 
 # === LOAD DATA ===
@@ -49,10 +50,6 @@ def resample_ohlcv(df_slice, timeframe):
     """
     Resamples 1-minute OHLCV data to a higher timeframe, respecting
     the Indian market session (09:15:00 to 15:30:00).
-    The logic ensures:
-    - Open = First candle's open in the group.
-    - Close = Last candle's close in the group.
-    - High/Low = Max/Min of all candles in the group.
     """
     if df_slice.empty:
         return df_slice
@@ -66,7 +63,7 @@ def resample_ohlcv(df_slice, timeframe):
     # Filter to the trading session (09:15:00 to 15:30:00 inclusive)
     df_slice = df_slice.between_time("09:15", "15:30")
     
-    # If 1m, no resampling needed, just format and return the already filtered data
+    # If 1m, no resampling needed...
     if timeframe == '1m':
         res = df_slice.reset_index().rename(columns={"timestamp": "timestamp"})
         res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -80,6 +77,22 @@ def resample_ohlcv(df_slice, timeframe):
         "volume": "sum"
     }
 
+    # --- Daily Candle (1D) Logic ---
+    if timeframe == '1D':
+        # Group by the calendar date index directly for daily bars
+        # This aggregates all 1-minute data between 09:15 and 15:30 into one daily bar.
+        res = (
+            df_slice.groupby(df_slice.index.date)
+            .agg(agg)
+        )
+        res.index.name = "timestamp"
+        res = res.reset_index()
+        # Daily bars are labelled by date only, we format to match the date-time string pattern
+        res["timestamp"] = pd.to_datetime(res["timestamp"]).dt.strftime("%Y-%m-%d 00:00:00")
+        return res[["timestamp", "open", "high", "low", "close", "volume"]]
+
+
+    # --- Intraday Resampling (3m, 5m, 15m, 30m, 1h) Logic ---
     resampled_days = []
     
     # Group by date to handle daily sessions separately and prevent data leakage across days
@@ -101,12 +114,6 @@ def resample_ohlcv(df_slice, timeframe):
             # Drop any bars that had no 1-minute data in their period
             .dropna(subset=['open', 'high', 'low', 'close']) 
         )
-        
-        # 2. FIX: The strict boundary check that dropped the final partial bar 
-        # (e.g., 3:15 PM candle) has been removed.
-        # Since the input data is already strictly filtered to 09:15-15:30, 
-        # the resampled data will naturally stop at the final bar containing data,
-        # regardless of its length.
         
         resampled_days.append(res_day)
 
@@ -136,7 +143,7 @@ def get_chart():
       - strike=24700                (optional)
       - type=CE|PE                  (optional)
       - expiry=YYYY-MM-DD           (optional)
-      - timeframe=1m|3m|5m|15m|30m|1h  (default: 1m)
+      - timeframe=1m|3m|5m|10m|15m|30m|1h|1D  (default: 1m) <-- UPDATED DOC
     """
     timeframe = request.args.get('timeframe', '1m')
     symbol = request.args.get('symbol')
