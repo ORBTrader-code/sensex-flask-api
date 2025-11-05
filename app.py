@@ -8,182 +8,115 @@ app = Flask(__name__)
 CORS(app)
 
 # === CONFIG ===
-CSV_FILE = os.path.join(os.path.dirname(__file__), "nifty_data.csv")
-# Global TF_MAP used for pandas rule lookup
 TF_MAP = {
     "1m": "1T", 
-    "3m": "3T", # Added/Confirmed
+    "3m": "3T", 
     "5m": "5T", 
     "10m": "10T", 
     "15m": "15T", 
     "30m": "30T", 
     "1h": "1H",
-    "1D": "D" # Pandas rule for Daily Resampling
+    "1D": "D"
 }
 
-# === LOAD DATA ===
-try:
-    df = pd.read_csv(CSV_FILE)
-    # Ensure consistent names and dtypes
-    df.columns = [c.strip() for c in df.columns]
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    # Create normalized tradingsymbol and extracted strike/type columns
-    df['tradingsymbol'] = df['tradingsymbol'].astype(str)
-except Exception as e:
-    print("❌ Error loading CSV:", e)
-    df = pd.DataFrame(columns=["date","tradingsymbol","expiry","timestamp","open","high","low","close","volume"])
-
-# helper: extract strike + type (like "24700PE") and strike number "24700"
 def extract_strike_and_type(sym):
-    m = re.search(r'(\d{5})(CE|PE)', sym)
+    m = re.search(r'(\d{5})(CE|PE)', str(sym))
     if m:
         return m.group(1), m.group(2)
     return None, None
 
-df['_strike_num'] = df['tradingsymbol'].apply(lambda s: extract_strike_and_type(s)[0])
-df['_opt_type'] = df['tradingsymbol'].apply(lambda s: extract_strike_and_type(s)[1])
-# normalize expiry if present as string (keep as-is)
-df['expiry'] = df['expiry'].astype(str)
-
-# === RESAMPLE UTILITY (CORRECTED) ===
 def resample_ohlcv(df_slice, timeframe):
-    """
-    Resamples 1-minute OHLCV data to a higher timeframe, respecting
-    the Indian market session (09:15:00 to 15:30:00).
-    """
     if df_slice.empty:
         return df_slice
 
     rule = TF_MAP.get(timeframe, "1T")
-
     df_slice = df_slice.copy()
     df_slice["timestamp"] = pd.to_datetime(df_slice["timestamp"])
     df_slice = df_slice.set_index("timestamp").sort_index()
-
-    # Filter to the trading session (09:15:00 to 15:30:00 inclusive)
     df_slice = df_slice.between_time("09:15", "15:30")
-    
-    # If 1m, no resampling needed...
+
     if timeframe == '1m':
-        res = df_slice.reset_index().rename(columns={"timestamp": "timestamp"})
+        res = df_slice.reset_index()
         res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
         return res[["timestamp", "open", "high", "low", "close", "volume"]]
 
-    agg = {
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum"
-    }
+    agg = {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}
 
-    # --- Daily Candle (1D) Logic ---
     if timeframe == '1D':
-        # Group by the calendar date index directly for daily bars
-        # This aggregates all 1-minute data between 09:15 and 15:30 into one daily bar.
-        res = (
-            df_slice.groupby(df_slice.index.date)
-            .agg(agg)
-        )
+        res = df_slice.groupby(df_slice.index.date).agg(agg)
         res.index.name = "timestamp"
         res = res.reset_index()
-        # Daily bars are labelled by date only, we format to match the date-time string pattern
         res["timestamp"] = pd.to_datetime(res["timestamp"]).dt.strftime("%Y-%m-%d 00:00:00")
         return res[["timestamp", "open", "high", "low", "close", "volume"]]
 
-
-    # --- Intraday Resampling (3m, 5m, 15m, 30m, 1h) Logic ---
-    resampled_days = []
-    
-    # Group by date to handle daily sessions separately and prevent data leakage across days
-    for day, day_df in df_slice.groupby(df_slice.index.date):
-        
+    parts = []
+    for _, day_df in df_slice.groupby(df_slice.index.date):
         if day_df.empty:
             continue
-
-        # 1. Resample the daily data. 
-        # Use origin='9:15:00' to align all timeframes to the exact market open time.
         res_day = (
-            day_df.resample(
-                rule, 
-                label="left", 
-                closed="left",
-                origin='9:15:00'
-            )
-            .apply(agg)
-            # Drop any bars that had no 1-minute data in their period
-            .dropna(subset=['open', 'high', 'low', 'close']) 
+            day_df.resample(rule, label="left", closed="left", origin='9:15:00')
+                  .apply(agg)
+                  .dropna(subset=['open','high','low','close'])
         )
-        
-        resampled_days.append(res_day)
+        parts.append(res_day)
 
-    if not resampled_days:
-        return pd.DataFrame() # Return empty DataFrame if no data found
+    if not parts:
+        return pd.DataFrame()
 
-    res = pd.concat(resampled_days).sort_index().reset_index()
-    res.rename(columns={"index": "timestamp"}, inplace=True)
+    res = pd.concat(parts).sort_index().reset_index()
+    res.rename(columns={"index":"timestamp"}, inplace=True)
     res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    return res[["timestamp", "open", "high", "low", "close", "volume"]]
+    return res[["timestamp","open","high","low","close","volume"]]
 
-
-# === ROUTES ===
 @app.route('/')
 def home():
-    return "✅ Nifty Options API (resample-enabled) is running."
+    return "✅ Nifty Options API (Expiry-based dynamic loading) is running."
 
 @app.route('/preview')
 def preview():
-    return jsonify(df.head(5).to_dict(orient='records'))
+    files = [f for f in os.listdir() if f.startswith("nifty_data_") and f.endswith(".csv")]
+    return jsonify({"available_files": files})
 
 @app.route('/get_chart')
 def get_chart():
-    """
-    Query params:
-      - symbol=FULL_TRADINGSYMBOL   (optional if using strike+type)
-      - strike=24700                (optional)
-      - type=CE|PE                  (optional)
-      - expiry=YYYY-MM-DD           (optional)
-      - timeframe=1m|3m|5m|10m|15m|30m|1h|1D  (default: 1m) <-- UPDATED DOC
-    """
     timeframe = request.args.get('timeframe', '1m')
-    symbol = request.args.get('symbol')
     strike = request.args.get('strike')
-    opt_type = request.args.get('type')  # CE or PE
-    expiry = request.args.get('expiry')
+    opt_type = request.args.get('type', 'PE')
+    expiry = request.args.get('expiry')  # e.g. 04nov25
 
-    # 1) If symbol provided, filter exact match (case-insensitive)
-    if symbol:
-        mask = df['tradingsymbol'].str.upper() == symbol.upper()
-        df_slice = df[mask].copy()
-    else:
-        # 2) Use strike + type (both required ideally)
-        if not strike:
-            return jsonify({"error":"Provide symbol or strike parameter"}), 400
-        strike = str(int(strike))  # normalize like '24700'
-        if opt_type:
-            opt_type = opt_type.upper()
-            mask = (df['_strike_num'] == strike) & (df['_opt_type'] == opt_type)
-        else:
-            # if type not provided, accept both CE/PE for given strike
-            mask = (df['_strike_num'] == strike)
-        df_slice = df[mask].copy()
+    if not expiry:
+        return jsonify({"error": "Expiry parameter is required"}), 400
 
-        # 3) Optional expiry filter
-        if expiry:
-            df_slice = df_slice[df_slice['expiry'] == expiry]
+    file_name = f"nifty_data_{expiry.lower()}.csv"
+    if not os.path.exists(file_name):
+        return jsonify({"error": f"File {file_name} not found"}), 404
+
+    try:
+        df = pd.read_csv(file_name)
+        df.columns = [c.strip() for c in df.columns]
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['tradingsymbol'] = df['tradingsymbol'].astype(str)
+        df['_strike_num'] = df['tradingsymbol'].apply(lambda s: extract_strike_and_type(s)[0])
+        df['_opt_type']  = df['tradingsymbol'].apply(lambda s: extract_strike_and_type(s)[1])
+        df['expiry'] = df.get('expiry', pd.Series(dtype=str)).astype(str)
+    except Exception as e:
+        return jsonify({"error": f"Error reading CSV: {e}"}), 500
+
+    if not strike:
+        return jsonify({"error": "Strike parameter required"}), 400
+
+    strike = str(int(strike))
+    mask = (df['_strike_num'] == strike) & (df['_opt_type'] == opt_type.upper())
+    df_slice = df[mask].copy()
 
     if df_slice.empty:
-        return jsonify({"error":"No data found for the requested parameters"}), 404
+        return jsonify({"error": "No data found for the given strike/type"}), 404
 
-    # Resample to requested timeframe
     try:
         resampled = resample_ohlcv(df_slice, timeframe)
     except Exception as e:
-        # Log the error internally for better debugging
-        print(f"Resample failed: {e}") 
         return jsonify({"error": f"Resample error: {e}"}), 500
 
-    # Return JSON array
     return jsonify(resampled.to_dict(orient='records'))
 
 if __name__ == '__main__':
