@@ -22,14 +22,12 @@ TF_MAP = {
 
 # === Multi-Level Cache Setup ===
 
-# L1 Cache: Stores *processed* DataFrames for each expiry.
-# We use an LRUCache to manage memory, especially on platforms like Render.
-# --- MODIFICATION: Set maxsize=1 per user request to be memory-safe ---
-# This holds ONLY ONE expiry at a time, clearing memory when switching.
-data_cache = LRUCache(maxsize=1)
+# --- REMOVED L1 CACHE ---
+# The L1 cache (data_cache) is removed.
+# We cannot store the whole processed file in memory as it's > 512MB.
 
 # L2 Cache: Stores the *final resampled data* (the JSON response).
-# This makes identical queries (same expiry, strike, type, tf) instantaneous.
+# This is now our ONLY cache. It makes *identical* queries instantaneous.
 # maxsize=200 stores the 200 most recent unique chart requests.
 resample_cache = LRUCache(maxsize=200)
 
@@ -40,88 +38,8 @@ def extract_strike_and_type(sym):
         return m.group(1), m.group(2)
     return None, None
 
-def get_processed_data(expiry):
-    """
-    Custom function to load, process, and cache the DataFrame for a given expiry.
-    This populates the L1 cache (data_cache).
-    """
-    # 1. Check L1 Cache first
-    if expiry in data_cache:
-        return data_cache[expiry]
-
-    # 2. If not in cache, load from disk
-    file_name = f"nifty_data_{expiry.lower()}.csv"
-    if not os.path.exists(file_name):
-        raise FileNotFoundError(f"File {file_name} not found")
-
-    # 3. This is the slow part: I/O and heavy processing
-    print(f"CACHE MISS (L1): Loading and processing {file_name}...")
-
-    # --- SPEED OPTIMIZATION ---
-    # Define ONLY the columns we need, to speed up reading.
-    COLS_TO_USE = ['timestamp', 'tradingsymbol', 'open', 'high', 'low', 'close', 'volume']
-    # Define data types to reduce memory and speed up parsing.
-    DTYPES = {
-        'tradingsymbol': 'str',
-        'open': 'float32',
-        'high': 'float32',
-        'low': 'float32',
-        'close': 'float32',
-        'volume': 'int32' # Assuming volume is integer
-    }
-
-    try:
-        # Use 'pyarrow' engine (must be in requirements.txt) for a massive speedup.
-        # Use 'usecols' and 'dtype' to load only what's necessary.
-        df = pd.read_csv(
-            file_name,
-            usecols=COLS_TO_USE,
-            dtype=DTYPES,
-            engine='pyarrow'
-        )
-    except Exception as e:
-        print(f"PyArrow engine failed ({e}), falling back to default engine...")
-        # Fallback if pyarrow has trouble with the file
-        df = pd.read_csv(
-            file_name,
-            usecols=COLS_TO_USE,
-            dtype=DTYPES
-        )
-    
-    # --- END SPEED OPTIMIZATION ---
-
-    df.columns = [c.strip() for c in df.columns]
-
-    # --- SPEED OPTIMIZATION: Specify date format for faster conversion ---
-    # Assuming timestamp format is 'YYYY-MM-DD HH:MM:SS'
-    df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
-    # Drop any rows where the date conversion failed
-    df.dropna(subset=['timestamp'], inplace=True)
-    # --- END SPEED OPTIMIZATION ---
-
-    df['tradingsymbol'] = df['tradingsymbol'].astype(str)
-
-    # --- MODIFICATION: Optimized .apply() ---
-    # Combine both regex extractions into a single pass for speed
-    df[['_strike_num', '_opt_type']] = df['tradingsymbol'].apply(
-        lambda s: pd.Series(extract_strike_and_type(s))
-    )
-    # --- END MODIFICATION ---
-
-    # --- REMOVED: This line was unnecessary and read a column we don't need ---
-    # df['expiry'] = df.get('expiry', pd.Series(dtype=str)).astype(str)
-
-    # 4. --- OPTIMIZATION: Index the data for fast lookups ---
-    # Drop rows where strike/type couldn't be parsed
-    df.dropna(subset=['_strike_num', '_opt_type'], inplace=True)
-    # Set a MultiIndex for *dramatically* faster filtering
-    df.set_index(['_strike_num', '_opt_type'], inplace=True)
-    df.sort_index(inplace=True) # Sorting is crucial for .loc performance
-
-    # 5. Store the processed DataFrame in the L1 cache
-    data_cache[expiry] = df
-    print(f"CACHE SET (L1): Stored processed data for {expiry}")
-    return df
+# --- REMOVED get_processed_data() FUNCTION ---
+# We will do all processing inside get_chart() in a memory-safe way.
 
 
 def resample_ohlcv(df_slice, timeframe):
@@ -135,7 +53,13 @@ def resample_ohlcv(df_slice, timeframe):
 
     rule = TF_MAP.get(timeframe, "1T")
     df_slice = df_slice.copy()
-    # df_slice["timestamp"] = pd.to_datetime(df_slice["timestamp"]) # No longer needed
+    
+    # --- MODIFICATION: Timestamp conversion must happen here ---
+    # We are now passing in a non-indexed, non-datetime-converted DataFrame
+    df_slice['timestamp'] = pd.to_datetime(df_slice['timestamp'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
+    df_slice.dropna(subset=['timestamp'], inplace=True)
+    # --- END MODIFICATION ---
+
     df_slice = df_slice.set_index("timestamp").sort_index()
     df_slice = df_slice.between_time("09:15", "15:30")
 
@@ -204,28 +128,81 @@ def get_chart():
 
     print(f"CACHE MISS (L2): Processing request for {cache_key}")
 
-    try:
-        # --- STEP 1: Get base data (from L1 cache or load/process) ---
-        df = get_processed_data(expiry)
-    except FileNotFoundError as e:
-        return jsonify({"error": str(e)}), 404
-    except Exception as e:
-        return jsonify({"error": f"Error reading or processing file: {e}"}), 500
+    # --- NEW MEMORY-SAFE CHUNKING PROCESS ---
+    
+    file_name = f"nifty_data_{expiry.lower()}.csv"
+    if not os.path.exists(file_name):
+        return jsonify({"error": f"File {file_name} not found"}), 404
 
+    # Define ONLY the columns we need, to speed up reading.
+    COLS_TO_USE = ['timestamp', 'tradingsymbol', 'open', 'high', 'low', 'close', 'volume']
+    # Define data types to reduce memory and speed up parsing.
+    DTYPES = {
+        'tradingsymbol': 'str',
+        'open': 'float32',
+        'high': 'float32',
+        'low': 'float32',
+        'close': 'float32',
+        'volume': 'int32' # Assuming volume is integer
+    }
+    
+    # We will read the file in chunks to avoid OOM errors
+    chunksize = 100000  # Read 100k rows at a time
+    filtered_chunks = []
+
+    print(f"Starting memory-safe chunked read for {file_name}...")
+    
     try:
-        # --- STEP 2: Filter data (now much faster) ---
-        # We use .loc on the MultiIndex for high-speed filtering
-        df_slice = df.loc[(strike_str, opt_type)].copy()
-    except KeyError:
-        return jsonify({"error": "No data found for the given strike/type"}), 404
+        # Loop through the file in chunks
+        for chunk in pd.read_csv(
+            file_name,
+            usecols=COLS_TO_USE,
+            dtype=DTYPES,
+            engine='pyarrow', # Still use pyarrow, it's fast at chunking
+            chunksize=chunksize
+        ):
+            # Process this chunk
+            chunk.columns = [c.strip() for c in chunk.columns]
+            
+            # --- Extract strike/type for this chunk ---
+            chunk[['_strike_num', '_opt_type']] = chunk['tradingsymbol'].apply(
+                lambda s: pd.Series(extract_strike_and_type(s))
+            )
+            
+            # --- Filter the chunk ---
+            # This is the most important step: we only keep rows that match
+            matching_rows = chunk.loc[
+                (chunk['_strike_num'] == strike_str) & 
+                (chunk['_opt_type'] == opt_type)
+            ]
+            
+            # If we found matching rows, save this small piece
+            if not matching_rows.empty:
+                # We only need the original columns for resampling
+                filtered_chunks.append(matching_rows[COLS_TO_USE])
+        
+        print(f"Chunked read finished. Found {len(filtered_chunks)} matching chunks.")
+
     except Exception as e:
-        return jsonify({"error": f"Error filtering data: {e}"}), 500
+        print(f"Error during chunked read: {e}")
+        return jsonify({"error": f"Error reading file: {e}"}), 500
+
+    # If no chunks were found, no data exists
+    if not filtered_chunks:
+        return jsonify({"error": "No data found for the given strike/type"}), 404
+
+    # --- STEP 2: Combine the small filtered pieces ---
+    # This df_slice is now very small (only one strike) and fits in memory
+    try:
+        df_slice = pd.concat(filtered_chunks, ignore_index=True)
+    except Exception as e:
+        return jsonify({"error": f"Error concatenating chunks: {e}"}), 500
 
     if df_slice.empty:
         return jsonify({"error": "No data found for the given strike/type"}), 404
 
+    # --- STEP 3: Resample (only on the filtered slice) ---
     try:
-        # --- STEP 3: Resample (only on the filtered slice) ---
         resampled = resample_ohlcv(df_slice, timeframe)
         result_dict = resampled.to_dict(orient='records')
 
