@@ -27,7 +27,7 @@ TF_MAP = {
 # We use an LRUCache to manage memory, especially on platforms like Render.
 # maxsize=10 means it will hold the 10 most recently used expiry files.
 # ADJUST maxsize based on your server's RAM and average file size.
-data_cache = LRUCache(maxsize=10)
+data_cache = LRUCache(maxsize=2) # <<< MODIFICATION: Reduced cache size for low RAM
 
 # L2 Cache: Stores the *final resampled data* (the JSON response).
 # This makes identical queries (same expiry, strike, type, tf) instantaneous.
@@ -61,8 +61,14 @@ def get_processed_data(expiry):
     df.columns = [c.strip() for c in df.columns]
     df['timestamp'] = pd.to_datetime(df['timestamp']) # Convert timestamp ONCE
     df['tradingsymbol'] = df['tradingsymbol'].astype(str)
-    df['_strike_num'] = df['tradingsymbol'].apply(lambda s: extract_strike_and_type(s)[0])
-    df['_opt_type'] = df['tradingsymbol'].apply(lambda s: extract_strike_and_type(s)[1])
+
+    # --- MODIFICATION: Optimized .apply() ---
+    # Combine both regex extractions into a single pass for speed
+    df[['_strike_num', '_opt_type']] = df['tradingsymbol'].apply(
+        lambda s: pd.Series(extract_strike_and_type(s))
+    )
+    # --- END MODIFICATION ---
+
     df['expiry'] = df.get('expiry', pd.Series(dtype=str)).astype(str)
 
     # 4. --- OPTIMIZATION: Index the data for fast lookups ---
