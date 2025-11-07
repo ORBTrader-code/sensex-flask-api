@@ -158,7 +158,7 @@ def get_chart():
             file_name,
             usecols=COLS_TO_USE,
             dtype=DTYPES,
-            engine='pyarrow', # Still use pyarrow, it's fast at chunking
+            # engine='pyarrow', # <<< REMOVED: This engine doesn't support chunksize
             chunksize=chunksize
         ):
             # Process this chunk
