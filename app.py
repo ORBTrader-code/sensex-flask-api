@@ -35,7 +35,7 @@ resample_cache = LRUCache(maxsize=200)
 # --- FUNCTION REMOVED ---
 # The new vectorized method in get_chart() makes this function obsolete.
 # def extract_strike_and_type(sym):
-        return m.group(1), m.group(2)
+#        return m.group(1), m.group(2)
 #     return None, None
 
 # --- REMOVED get_processed_data() FUNCTION ---
