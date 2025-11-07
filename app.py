@@ -93,7 +93,10 @@ def resample_ohlcv(df_slice, timeframe):
 
     res = pd.concat(parts).sort_index().reset_index()
     res.rename(columns={"index":"timestamp"}, inplace=True)
-    res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:M:%S")
+    # --- FIX: Corrected the time format string ---
+    # Was: "%Y-%m-%d %H:M:%S" (Missing % on M)
+    # Is:  "%Y-%m-%d %H:%M:%S" (Correct)
+    res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
     return res[["timestamp","open","high","low","close","volume"]]
 
 @app.route('/')
