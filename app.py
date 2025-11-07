@@ -32,11 +32,11 @@ TF_MAP = {
 resample_cache = LRUCache(maxsize=200)
 
 
-def extract_strike_and_type(sym):
-    m = re.search(r'(\d{5})(CE|PE)', str(sym))
-    if m:
+# --- FUNCTION REMOVED ---
+# The new vectorized method in get_chart() makes this function obsolete.
+# def extract_strike_and_type(sym):
         return m.group(1), m.group(2)
-    return None, None
+#     return None, None
 
 # --- REMOVED get_processed_data() FUNCTION ---
 # We will do all processing inside get_chart() in a memory-safe way.
@@ -93,7 +93,7 @@ def resample_ohlcv(df_slice, timeframe):
 
     res = pd.concat(parts).sort_index().reset_index()
     res.rename(columns={"index":"timestamp"}, inplace=True)
-    res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:M:%S")
     return res[["timestamp","open","high","low","close","volume"]]
 
 @app.route('/')
@@ -164,10 +164,10 @@ def get_chart():
             # Process this chunk
             chunk.columns = [c.strip() for c in chunk.columns]
             
-            # --- Extract strike/type for this chunk ---
-            chunk[['_strike_num', '_opt_type']] = chunk['tradingsymbol'].apply(
-                lambda s: pd.Series(extract_strike_and_type(s))
-            )
+            # --- PERFORMANCE FIX: Replaced slow .apply() with fast .str.extract() ---
+            # This is a vectorized string operation that runs at C-speed.
+            chunk[['_strike_num', '_opt_type']] = chunk['tradingsymbol'].str.extract(r'(\d{5})(CE|PE)', expand=True)
+            # --- END PERFORMANCE FIX ---
             
             # --- Filter the chunk ---
             # This is the most important step: we only keep rows that match
