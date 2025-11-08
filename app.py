@@ -4,7 +4,8 @@ import pandas as pd
 import re
 import os
 from cachetools import LRUCache # Import the LRU Cache
-import pyarrow.parquet as pq # <<<--- IMPORTED PYARROW
+import pyarrow.parquet as pq
+import datetime # <<<--- IMPORTED DATETIME
 
 app = Flask(__name__)
 CORS(app)
@@ -22,7 +23,6 @@ TF_MAP = {
 }
 
 # === Multi-Level Cache Setup ===
-# L2 Cache: Stores the *final resampled data* (the JSON response).
 resample_cache = LRUCache(maxsize=200)
 
 
@@ -36,10 +36,8 @@ def resample_ohlcv(df_slice, timeframe):
     rule = TF_MAP.get(timeframe, "1T")
     df_slice = df_slice.copy()
     
-    # --- MODIFICATION: Timestamp conversion must happen here ---
     df_slice['timestamp'] = pd.to_datetime(df_slice['timestamp'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
     df_slice.dropna(subset=['timestamp'], inplace=True)
-    # --- END MODIFICATION ---
 
     df_slice = df_slice.set_index("timestamp").sort_index()
     df_slice = df_slice.between_time("09:15", "15:30")
@@ -83,20 +81,38 @@ def home():
 
 @app.route('/preview')
 def preview():
-    # --- MODIFICATION: Look for .parquet OR .csv files ---
     files = [f for f in os.listdir() if f.startswith("nifty_data_") and (f.endswith(".csv") or f.endswith(".parquet"))]
     
-    # Clean up names to create a unique list of expiries
     expiries = set()
     for f in files:
         name = f.replace("nifty_data_", "").replace(".csv", "").replace(".parquet", "")
         expiries.add(name)
         
-    # Re-format for the frontend
-    # This just mimics the old "available_files" structure
-    available_files = [f"nifty_data_{name}.csv" for name in sorted(list(expiries))]
-    
-    return jsonify({"available_files": available_files})
+    # --- NEW: Create a structured list for the calendar ---
+    available_expiries = []
+    for name in sorted(list(expiries)):
+        try:
+            # Try to parse the date from the name (e.g., "04jul24")
+            dt = datetime.datetime.strptime(name, "%d%b%y")
+            
+            # Format for the calendar (YYYY-MM-DD)
+            date_str = dt.strftime("%Y-%m-%d")
+            
+            # Format for the label (e.g., "04 Jul 2024")
+            label_str = dt.strftime("%d %b %Y")
+            
+            available_expiries.append({
+                "value": name,      # The value the API understands (04jul24)
+                "label": label_str,   # A human-friendly label
+                "date": date_str      # The machine-readable date for the calendar
+            })
+        except ValueError:
+            # Handle cases where the name isn't a date (e.g., "weekly1")
+            # For this app, we'll just log it and skip it
+            print(f"Could not parse date from filename: {name}")
+            
+    return jsonify({"available_expiries": available_expiries})
+    # --- END MODIFICATION ---
 
 @app.route('/get_chart')
 def get_chart():
@@ -110,19 +126,16 @@ def get_chart():
     if not strike:
         return jsonify({"error": "Strike parameter required"}), 400
 
-    strike_str = str(int(strike)) # Clean the strike input
+    strike_str = str(int(strike))
 
     # --- L2 CACHE CHECK ---
     cache_key = (expiry, strike_str, opt_type, timeframe)
     if cache_key in resample_cache:
         print(f"CACHE HIT (L2): Returning cached resample for {cache_key}")
-        return jsonify(resample_cache[cache_key]) # Instant response!
+        return jsonify(resample_cache[cache_key])
 
     print(f"CACHE MISS (L2): Processing request for {cache_key}")
 
-    # --- NEW FILE DETECTION LOGIC ---
-    # We will try to find a Parquet file first. If not, we fall back to CSV.
-    
     parquet_file = f"nifty_data_{expiry.lower()}.parquet"
     csv_file = f"nifty_data_{expiry.lower()}.csv"
     
@@ -138,28 +151,22 @@ def get_chart():
     else:
         return jsonify({"error": f"File for expiry {expiry} not found"}), 404
 
-    # --- END NEW FILE DETECTION LOGIC ---
-
-
     COLS_TO_USE = ['timestamp', 'tradingsymbol', 'open', 'high', 'low', 'close', 'volume']
     DTYPES = {
         'tradingsymbol': 'str', 'open': 'float32', 'high': 'float32',
         'low': 'float32', 'close': 'float32', 'volume': 'int32'
     }
     
-    chunksize = 100000  # Read 100k rows at a time
+    chunksize = 100000 
     filtered_chunks = []
     
     try:
-        # --- NEW DYNAMIC READ LOGIC ---
         if read_mode == "parquet":
             print(f"Starting memory-safe PARQUET read for {file_name}...")
             pf = pq.ParquetFile(file_name)
             
             for batch in pf.iter_batches(batch_size=chunksize, columns=COLS_TO_USE):
                 chunk = batch.to_pandas()
-                # (The rest of the loop logic is identical to the CSV loop)
-                
                 chunk.columns = [c.strip() for c in chunk.columns]
                 chunk[['_strike_num', '_opt_type']] = chunk['tradingsymbol'].str.extract(r'(\d{5})(CE|PE)', expand=True)
                 
@@ -179,7 +186,6 @@ def get_chart():
                 dtype=DTYPES,
                 chunksize=chunksize
             ):
-                # (This is your existing, working CSV logic)
                 chunk.columns = [c.strip() for c in chunk.columns]
                 chunk[['_strike_num', '_opt_type']] = chunk['tradingsymbol'].str.extract(r'(\d{5})(CE|PE)', expand=True)
                 
@@ -190,7 +196,6 @@ def get_chart():
                 
                 if not matching_rows.empty:
                     filtered_chunks.append(matching_rows[COLS_TO_USE])
-        # --- END DYNAMIC READ LOGIC ---
 
         print(f"Chunked read finished. Found {len(filtered_chunks)} matching chunks.")
 
@@ -201,7 +206,6 @@ def get_chart():
     if not filtered_chunks:
         return jsonify({"error": "No data found for the given strike/type"}), 404
 
-    # --- STEP 2: Combine the small filtered pieces ---
     try:
         df_slice = pd.concat(filtered_chunks, ignore_index=True)
     except Exception as e:
@@ -210,12 +214,10 @@ def get_chart():
     if df_slice.empty:
         return jsonify({"error": "No data found for the given strike/type"}), 404
 
-    # --- STEP 3: Resample (only on the filtered slice) ---
     try:
         resampled = resample_ohlcv(df_slice, timeframe)
         result_dict = resampled.to_dict(orient='records')
 
-        # --- STEP 4: Store in L2 Cache ---
         resample_cache[cache_key] = result_dict
         print(f"CACHE SET (L2): Stored resample for {cache_key}")
 
