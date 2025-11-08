@@ -4,49 +4,31 @@ import pandas as pd
 import re
 import os
 from cachetools import LRUCache # Import the LRU Cache
+import pyarrow.parquet as pq # <<<--- IMPORTED PYARROW
 
 app = Flask(__name__)
 CORS(app)
 
 # === CONFIG ===
 TF_MAP = {
-    "1m": "1T",
-    "3m": "3T",
-    "5m": "5T",
-    "10m": "10T",
-    "15m": "15T",
-    "30m": "30T",
+    "1m": "1T", 
+    "3m": "3T", 
+    "5m": "5T", 
+    "10m": "10T", 
+    "15m": "15T", 
+    "30m": "30T", 
     "1h": "1H",
     "1D": "D"
 }
 
 # === Multi-Level Cache Setup ===
-
-# --- REMOVED L1 CACHE ---
-# The L1 cache (data_cache) is removed.
-# We cannot store the whole processed file in memory as it's > 512MB.
-
 # L2 Cache: Stores the *final resampled data* (the JSON response).
-# This is now our ONLY cache. It makes *identical* queries instantaneous.
-# maxsize=200 stores the 200 most recent unique chart requests.
 resample_cache = LRUCache(maxsize=200)
-
-
-# --- FUNCTION REMOVED ---
-# The new vectorized method in get_chart() makes this function obsolete.
-# def extract_strike_and_type(sym):
-#        return m.group(1), m.group(2)
-#     return None, None
-
-# --- REMOVED get_processed_data() FUNCTION ---
-# We will do all processing inside get_chart() in a memory-safe way.
 
 
 def resample_ohlcv(df_slice, timeframe):
     """
     Resamples the data.
-    NOTE: We removed the redundant pd.to_datetime conversion,
-    as it's now handled in get_processed_data.
     """
     if df_slice.empty:
         return df_slice
@@ -55,7 +37,6 @@ def resample_ohlcv(df_slice, timeframe):
     df_slice = df_slice.copy()
     
     # --- MODIFICATION: Timestamp conversion must happen here ---
-    # We are now passing in a non-indexed, non-datetime-converted DataFrame
     df_slice['timestamp'] = pd.to_datetime(df_slice['timestamp'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
     df_slice.dropna(subset=['timestamp'], inplace=True)
     # --- END MODIFICATION ---
@@ -93,9 +74,6 @@ def resample_ohlcv(df_slice, timeframe):
 
     res = pd.concat(parts).sort_index().reset_index()
     res.rename(columns={"index":"timestamp"}, inplace=True)
-    # --- FIX: Corrected the time format string ---
-    # Was: "%Y-%m-%d %H:M:%S" (Missing % on M)
-    # Is:  "%Y-%m-%d %H:%M:%S" (Correct)
     res["timestamp"] = res["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
     return res[["timestamp","open","high","low","close","volume"]]
 
@@ -105,8 +83,20 @@ def home():
 
 @app.route('/preview')
 def preview():
-    files = [f for f in os.listdir() if f.startswith("nifty_data_") and f.endswith(".csv")]
-    return jsonify({"available_files": files})
+    # --- MODIFICATION: Look for .parquet OR .csv files ---
+    files = [f for f in os.listdir() if f.startswith("nifty_data_") and (f.endswith(".csv") or f.endswith(".parquet"))]
+    
+    # Clean up names to create a unique list of expiries
+    expiries = set()
+    for f in files:
+        name = f.replace("nifty_data_", "").replace(".csv", "").replace(".parquet", "")
+        expiries.add(name)
+        
+    # Re-format for the frontend
+    # This just mimics the old "available_files" structure
+    available_files = [f"nifty_data_{name}.csv" for name in sorted(list(expiries))]
+    
+    return jsonify({"available_files": available_files})
 
 @app.route('/get_chart')
 def get_chart():
@@ -123,7 +113,6 @@ def get_chart():
     strike_str = str(int(strike)) # Clean the strike input
 
     # --- L2 CACHE CHECK ---
-    # Create a unique key for this *specific* request
     cache_key = (expiry, strike_str, opt_type, timeframe)
     if cache_key in resample_cache:
         print(f"CACHE HIT (L2): Returning cached resample for {cache_key}")
@@ -131,71 +120,88 @@ def get_chart():
 
     print(f"CACHE MISS (L2): Processing request for {cache_key}")
 
-    # --- NEW MEMORY-SAFE CHUNKING PROCESS ---
+    # --- NEW FILE DETECTION LOGIC ---
+    # We will try to find a Parquet file first. If not, we fall back to CSV.
     
-    file_name = f"nifty_data_{expiry.lower()}.csv"
-    if not os.path.exists(file_name):
-        return jsonify({"error": f"File {file_name} not found"}), 404
+    parquet_file = f"nifty_data_{expiry.lower()}.parquet"
+    csv_file = f"nifty_data_{expiry.lower()}.csv"
+    
+    file_name = ""
+    read_mode = ""
 
-    # Define ONLY the columns we need, to speed up reading.
+    if os.path.exists(parquet_file):
+        file_name = parquet_file
+        read_mode = "parquet"
+    elif os.path.exists(csv_file):
+        file_name = csv_file
+        read_mode = "csv"
+    else:
+        return jsonify({"error": f"File for expiry {expiry} not found"}), 404
+
+    # --- END NEW FILE DETECTION LOGIC ---
+
+
     COLS_TO_USE = ['timestamp', 'tradingsymbol', 'open', 'high', 'low', 'close', 'volume']
-    # Define data types to reduce memory and speed up parsing.
     DTYPES = {
-        'tradingsymbol': 'str',
-        'open': 'float32',
-        'high': 'float32',
-        'low': 'float32',
-        'close': 'float32',
-        'volume': 'int32' # Assuming volume is integer
+        'tradingsymbol': 'str', 'open': 'float32', 'high': 'float32',
+        'low': 'float32', 'close': 'float32', 'volume': 'int32'
     }
     
-    # We will read the file in chunks to avoid OOM errors
     chunksize = 100000  # Read 100k rows at a time
     filtered_chunks = []
-
-    print(f"Starting memory-safe chunked read for {file_name}...")
     
     try:
-        # Loop through the file in chunks
-        for chunk in pd.read_csv(
-            file_name,
-            usecols=COLS_TO_USE,
-            dtype=DTYPES,
-            # engine='pyarrow', # <<< REMOVED: This engine doesn't support chunksize
-            chunksize=chunksize
-        ):
-            # Process this chunk
-            chunk.columns = [c.strip() for c in chunk.columns]
+        # --- NEW DYNAMIC READ LOGIC ---
+        if read_mode == "parquet":
+            print(f"Starting memory-safe PARQUET read for {file_name}...")
+            pf = pq.ParquetFile(file_name)
             
-            # --- PERFORMANCE FIX: Replaced slow .apply() with fast .str.extract() ---
-            # This is a vectorized string operation that runs at C-speed.
-            chunk[['_strike_num', '_opt_type']] = chunk['tradingsymbol'].str.extract(r'(\d{5})(CE|PE)', expand=True)
-            # --- END PERFORMANCE FIX ---
-            
-            # --- Filter the chunk ---
-            # This is the most important step: we only keep rows that match
-            matching_rows = chunk.loc[
-                (chunk['_strike_num'] == strike_str) & 
-                (chunk['_opt_type'] == opt_type)
-            ]
-            
-            # If we found matching rows, save this small piece
-            if not matching_rows.empty:
-                # We only need the original columns for resampling
-                filtered_chunks.append(matching_rows[COLS_TO_USE])
-        
+            for batch in pf.iter_batches(batch_size=chunksize, columns=COLS_TO_USE):
+                chunk = batch.to_pandas()
+                # (The rest of the loop logic is identical to the CSV loop)
+                
+                chunk.columns = [c.strip() for c in chunk.columns]
+                chunk[['_strike_num', '_opt_type']] = chunk['tradingsymbol'].str.extract(r'(\d{5})(CE|PE)', expand=True)
+                
+                matching_rows = chunk.loc[
+                    (chunk['_strike_num'] == strike_str) & 
+                    (chunk['_opt_type'] == opt_type)
+                ]
+                
+                if not matching_rows.empty:
+                    filtered_chunks.append(matching_rows[COLS_TO_USE])
+
+        elif read_mode == "csv":
+            print(f"Starting memory-safe CSV read for {file_name}...")
+            for chunk in pd.read_csv(
+                file_name,
+                usecols=COLS_TO_USE,
+                dtype=DTYPES,
+                chunksize=chunksize
+            ):
+                # (This is your existing, working CSV logic)
+                chunk.columns = [c.strip() for c in chunk.columns]
+                chunk[['_strike_num', '_opt_type']] = chunk['tradingsymbol'].str.extract(r'(\d{5})(CE|PE)', expand=True)
+                
+                matching_rows = chunk.loc[
+                    (chunk['_strike_num'] == strike_str) & 
+                    (chunk['_opt_type'] == opt_type)
+                ]
+                
+                if not matching_rows.empty:
+                    filtered_chunks.append(matching_rows[COLS_TO_USE])
+        # --- END DYNAMIC READ LOGIC ---
+
         print(f"Chunked read finished. Found {len(filtered_chunks)} matching chunks.")
 
     except Exception as e:
         print(f"Error during chunked read: {e}")
         return jsonify({"error": f"Error reading file: {e}"}), 500
 
-    # If no chunks were found, no data exists
     if not filtered_chunks:
         return jsonify({"error": "No data found for the given strike/type"}), 404
 
     # --- STEP 2: Combine the small filtered pieces ---
-    # This df_slice is now very small (only one strike) and fits in memory
     try:
         df_slice = pd.concat(filtered_chunks, ignore_index=True)
     except Exception as e:
