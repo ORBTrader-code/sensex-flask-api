@@ -79,6 +79,11 @@ def resample_ohlcv(df_slice, timeframe):
 def home():
     return "✅ Nifty Options API (Expiry-based dynamic loading) is running."
 
+@app.route('/ping')
+def ping():
+    return jsonify({"status": "alive", "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}), 200
+
+
 @app.route('/preview')
 def preview():
     files = [f for f in os.listdir() if f.startswith("nifty_data_") and (f.endswith(".csv") or f.endswith(".parquet"))]
