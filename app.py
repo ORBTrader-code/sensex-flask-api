@@ -77,20 +77,25 @@ def resample_ohlcv(df_slice, timeframe):
 
 @app.route('/')
 def home():
-    return "✅ Nifty Options API (Expiry-based dynamic loading) is running."
+    return "✅ Sensex Options API (Expiry-based dynamic loading) is running."
 
 @app.route('/ping')
 def ping():
-    return jsonify({"status": "alive", "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}), 200
+    return jsonify({
+        "service": "sensex",
+        "status": "alive",
+        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }), 200
+
 
 
 @app.route('/preview')
 def preview():
-    files = [f for f in os.listdir() if f.startswith("nifty_data_") and (f.endswith(".csv") or f.endswith(".parquet"))]
+    files = [f for f in os.listdir() if f.startswith("sensex_data_") and (f.endswith(".csv") or f.endswith(".parquet"))]
     
     expiries = set()
     for f in files:
-        name = f.replace("nifty_data_", "").replace(".csv", "").replace(".parquet", "")
+        name = f.replace("sensex_data_", "").replace(".csv", "").replace(".parquet", "")
         expiries.add(name)
         
     # --- NEW: Create a structured list for the calendar ---
@@ -141,8 +146,9 @@ def get_chart():
 
     print(f"CACHE MISS (L2): Processing request for {cache_key}")
 
-    parquet_file = f"nifty_data_{expiry.lower()}.parquet"
-    csv_file = f"nifty_data_{expiry.lower()}.csv"
+    parquet_file = f"sensex_data_{expiry.lower()}.parquet"
+    csv_file = f"sensex_data_{expiry.lower()}.csv"
+
     
     file_name = ""
     read_mode = ""
